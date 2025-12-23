@@ -59,8 +59,17 @@ void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
       // dynamically increase application stack.
       // hint: first allocate a new physical page, and then, maps the new page to the
       // virtual address that causes the page fault.
-      panic( "You need to implement the operations that actually handle the page fault in lab2_3.\n" );
-
+      {
+        uint64 pa = (uint64)alloc_page();
+        if (pa == 0) {
+          panic("handle_user_page_fault: alloc_page failed!");
+        }
+        uint64 va = ROUNDDOWN(stval, PGSIZE);
+        if (map_pages(current->pagetable, va, PGSIZE, pa,
+                      prot_to_type(PROT_READ | PROT_WRITE, 1)) != 0) {
+          panic("handle_user_page_fault: map_pages failed!");
+        }
+      }
       break;
     default:
       sprint("unknown page fault.\n");
