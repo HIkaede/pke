@@ -13,6 +13,16 @@ typedef struct elf_info_t {
   process *p;
 } elf_info;
 
+// Store ELF file path for backtrace
+static char elf_filename[256] = "";
+
+// Symbol table buffers - use static allocation
+elf_sym symtab_buffer[4096];
+char strtab_buffer[65536];
+uint64 sym_count = 0;
+uint64 strtab_size = 0;
+int backtrace_initialized = 0;
+
 //
 // the implementation of allocater. allocates memory space for later segment loading
 //
@@ -133,8 +143,110 @@ void load_bincode_from_host_elf(process *p) {
   // entry (virtual, also physical in lab1_x) address
   p->trapframe->epc = elfloader.ehdr.entry;
 
+  // Store process pointer and filename for backtrace
+  elfloader.p = p;
+  strcpy(elf_filename, arg_bug_msg.argv[0]);
+
   // close the host spike file
   spike_file_close( info.f );
 
   sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+}
+
+//
+// Get function name from address using symbol table (reads from file)
+//
+
+void init_backtrace_info(process *p) {
+  if (elf_filename[0] == '\0') {
+    sprint("No ELF filename stored for backtrace\n");
+    return;
+  }
+
+  // Open the ELF file to read section headers
+  spike_file_t *f = spike_file_open(elf_filename, O_RDONLY, 0);
+  if (IS_ERR_VALUE(f)) {
+    sprint("Failed to open ELF %s for backtrace\n", elf_filename);
+    return;
+  }
+
+  // Read ELF header
+  elf_header ehdr;
+  if (spike_file_pread(f, &ehdr, sizeof(ehdr), 0) != sizeof(ehdr)) {
+    spike_file_close(f);
+    return;
+  }
+
+  if (ehdr.magic != ELF_MAGIC) {
+    sprint("Invalid ELF magic in backtrace init\n");
+    spike_file_close(f);
+    return;
+  }
+
+  // Read section headers from file
+  for (int i = 0; i < ehdr.shnum; i++) {
+    elf_shdr shdr;
+    uint64 offset = ehdr.shoff + i * sizeof(shdr);
+    if (spike_file_pread(f, &shdr, sizeof(shdr), offset) != sizeof(shdr)) {
+      spike_file_close(f);
+      return;
+    }
+
+    // Get section name from string table
+    elf_shdr strtab_sh;
+    uint64 strtab_off = ehdr.shoff + ehdr.shstrndx * sizeof(elf_shdr);
+    if (spike_file_pread(f, &strtab_sh, sizeof(strtab_sh), strtab_off) != sizeof(strtab_sh)) {
+      spike_file_close(f);
+      return;
+    }
+
+    char name[32];
+    if (shdr.sh_name < strtab_sh.sh_size) {
+      spike_file_pread(f, name, sizeof(name), strtab_sh.sh_offset + shdr.sh_name);
+    } else {
+      continue;
+    }
+
+    if (strcmp(name, ".symtab") == 0) {
+      sym_count = shdr.sh_size / sizeof(elf_sym);
+      // Read entire symbol table into buffer
+      if (sym_count < 4096) {
+        spike_file_pread(f, symtab_buffer, shdr.sh_size, shdr.sh_offset);
+      }
+    } else if (strcmp(name, ".strtab") == 0) {
+      strtab_size = shdr.sh_size;
+      // Read string table into buffer
+      if (strtab_size < 65536) {
+        spike_file_pread(f, strtab_buffer, strtab_size, shdr.sh_offset);
+      }
+    }
+  }
+
+  spike_file_close(f);
+  backtrace_initialized = 1;
+}
+
+const char* get_func_name_from_addr(uint64 addr) {
+  if (!backtrace_initialized || sym_count == 0 || strtab_size == 0) {
+    return "?";
+  }
+
+  // Search symbol table for matching function
+  for (uint64 i = 0; i < sym_count; i++) {
+    elf_sym *sym = &symtab_buffer[i];
+
+    // Skip undefined symbols
+    if (sym->st_shndx == 0) continue;
+
+    // Check if this symbol contains the address
+    if (addr >= sym->st_value && addr < sym->st_value + sym->st_size) {
+      // Get symbol name from string table
+      if (sym->st_name < strtab_size) {
+        return strtab_buffer + sym->st_name;
+      }
+      break;
+    }
+  }
+
+  return "?";
 }

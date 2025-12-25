@@ -47,5 +47,13 @@ int printu(const char* s, ...) {
 // applications need to call exit to quit execution.
 //
 int exit(int code) {
-  return do_user_call(SYS_user_exit, code, 0, 0, 0, 0, 0, 0); 
+  return do_user_call(SYS_user_exit, code, 0, 0, 0, 0, 0, 0);
+}
+
+//
+// print_backtrace: print the function call stack
+// n: number of levels to print
+//
+void print_backtrace(int n) {
+  do_user_call(SYS_user_backtrace, n, 0, 0, 0, 0, 0, 0);
 }

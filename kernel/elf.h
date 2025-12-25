@@ -37,8 +37,34 @@ typedef struct elf_prog_header_t {
   uint64 align;  /* Segment alignment */
 } elf_prog_header;
 
+// Section header.
+typedef struct elf_shdr_t {
+  uint32 sh_name;      /* Section name (string tbl index) */
+  uint32 sh_type;      /* Section type */
+  uint64 sh_flags;     /* Section flags */
+  uint64 sh_addr;      /* Section virtual addr at execution */
+  uint64 sh_offset;    /* Section file offset */
+  uint64 sh_size;      /* Section size in bytes */
+  uint32 sh_link;      /* Link to another section */
+  uint32 sh_info;      /* Additional section information */
+  uint64 sh_addralign; /* Section alignment */
+  uint64 sh_entsize;   /* Entry size if section holds table */
+} elf_shdr;
+
+// Symbol table entry.
+typedef struct elf_sym_t {
+  uint32 st_name;   /* Symbol name (string tbl index) */
+  uint8 st_info;    /* Symbol type and binding */
+  uint8 st_other;   /* Symbol visibility */
+  uint16 st_shndx;  /* Section index */
+  uint64 st_value;  /* Symbol value */
+  uint64 st_size;   /* Symbol size */
+} elf_sym;
+
 #define ELF_MAGIC 0x464C457FU  // "\x7FELF" in little endian
 #define ELF_PROG_LOAD 1
+#define ELF_SHT_SYMTAB 2
+#define ELF_SHT_STRTAB 3
 
 typedef enum elf_status_t {
   EL_OK = 0,
@@ -53,11 +79,20 @@ typedef enum elf_status_t {
 typedef struct elf_ctx_t {
   void *info;
   elf_header ehdr;
+  // Store the process for symbol lookup
+  process *p;
 } elf_ctx;
 
 elf_status elf_init(elf_ctx *ctx, void *info);
 elf_status elf_load(elf_ctx *ctx);
 
 void load_bincode_from_host_elf(process *p);
+
+// Backtrace helper functions
+const char* get_func_name_from_addr(uint64 addr);
+void init_backtrace_info(process *p);
+
+// External variables for backtrace
+extern int backtrace_initialized;
 
 #endif
