@@ -221,3 +221,71 @@ int do_link(char *oldpath, char *newpath) {
 int do_unlink(char *path) {
   return vfs_unlink(path);
 }
+
+//
+// helper function to build path string from dentry to root
+//
+static void build_path_from_dentry(char *buf, struct dentry *dentry) {
+  if (dentry == NULL) {
+    buf[0] = '\0';
+    return;
+  }
+
+  // handle root case
+  if (dentry->parent == NULL || dentry == vfs_root_dentry) {
+    // this is root
+    strcpy(buf, "/");
+    return;
+  }
+
+  // recursively build path from parent
+  char temp[MAX_PATH_LEN];
+  build_path_from_dentry(temp, dentry->parent);
+
+  // append current dentry name with proper separator
+  // temp ends with "/" for non-root, but "/" for root
+  // we need to add "/" only if temp doesn't end with "/"
+  strcpy(buf, temp);
+  if (buf[strlen(buf) - 1] != '/') {
+    strcat(buf, "/");
+  }
+  strcat(buf, dentry->name);
+}
+
+//
+// read current working directory
+// return: 0 on success, -1 on failure
+//
+int do_rcwd(char *path) {
+  if (current->pfiles->cwd == NULL) {
+    current->pfiles->cwd = vfs_root_dentry;
+  }
+
+  build_path_from_dentry(path, current->pfiles->cwd);
+  return 0;
+}
+
+//
+// change current working directory
+// return: 0 on success, -1 on failure
+//
+int do_ccwd(char *path) {
+  struct dentry *parent = NULL;
+  char miss_name[MAX_PATH_LEN];
+
+  // look up the path
+  struct dentry *new_cwd = vfs_resolve_path(path, current->pfiles->cwd, &parent, miss_name);
+
+  if (!new_cwd) {
+    sprint("do_ccwd: cannot find directory: %s\n", path);
+    return -1;
+  }
+
+  if (new_cwd->dentry_inode->type != DIR_I) {
+    sprint("do_ccwd: not a directory: %s\n", path);
+    return -1;
+  }
+
+  current->pfiles->cwd = new_cwd;
+  return 0;
+}

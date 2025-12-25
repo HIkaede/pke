@@ -5,6 +5,7 @@
 #include "vfs.h"
 
 #include "pmm.h"
+#include "process.h"
 #include "spike_interface/spike_utils.h"
 #include "util/string.h"
 #include "util/types.h"
@@ -109,11 +110,11 @@ struct super_block *vfs_mount(const char *dev_name, int mnt_type) {
 // return: the file pointer to the opened file.
 //
 struct file *vfs_open(const char *path, int flags) {
-  struct dentry *parent = vfs_root_dentry; // we start the path lookup from root.
+  struct dentry *parent = NULL;  // will be set by vfs_resolve_path
   char miss_name[MAX_PATH_LEN];
 
-  // path lookup.
-  struct dentry *file_dentry = lookup_final_dentry(path, &parent, miss_name);
+  // path lookup, using current working directory if available
+  struct dentry *file_dentry = vfs_resolve_path(path, current->pfiles->cwd, &parent, miss_name);
 
   // file does not exist
   if (!file_dentry) {
@@ -260,12 +261,12 @@ int vfs_disk_stat(struct file *file, struct istat *istat) {
 // return: -1 on failure, 0 on success.
 //
 int vfs_link(const char *oldpath, const char *newpath) {
-  struct dentry *parent = vfs_root_dentry;
+  struct dentry *parent = NULL;
   char miss_name[MAX_PATH_LEN];
 
-  // lookup oldpath
+  // lookup oldpath, using current working directory if available
   struct dentry *old_file_dentry =
-      lookup_final_dentry(oldpath, &parent, miss_name);
+      vfs_resolve_path(oldpath, current->pfiles->cwd, &parent, miss_name);
   if (!old_file_dentry) {
     sprint("vfs_link: cannot find the file!\n");
     return -1;
@@ -276,11 +277,10 @@ int vfs_link(const char *oldpath, const char *newpath) {
     return -1;
   }
 
-  parent = vfs_root_dentry;
-  // lookup the newpath
-  // note that parent is changed to be the last directory entry to be accessed
+  // lookup the newpath using current working directory
+  struct dentry *new_parent = NULL;
   struct dentry *new_file_dentry =
-      lookup_final_dentry(newpath, &parent, miss_name);
+      vfs_resolve_path(newpath, current->pfiles->cwd, &new_parent, miss_name);
   if (new_file_dentry) {
     sprint("vfs_link: the new file already exists!\n");
     return -1;
@@ -294,9 +294,9 @@ int vfs_link(const char *oldpath, const char *newpath) {
   }
 
   // do the real hard-link
-  new_file_dentry = alloc_vfs_dentry(basename, old_file_dentry->dentry_inode, parent);
+  new_file_dentry = alloc_vfs_dentry(basename, old_file_dentry->dentry_inode, new_parent);
   int err =
-      viop_link(parent->dentry_inode, new_file_dentry, old_file_dentry->dentry_inode);
+      viop_link(new_parent->dentry_inode, new_file_dentry, old_file_dentry->dentry_inode);
   if (err) return -1;
 
   // make a new dentry for the new link
@@ -310,11 +310,11 @@ int vfs_link(const char *oldpath, const char *newpath) {
 // return: -1 on failure, 0 on success.
 //
 int vfs_unlink(const char *path) {
-  struct dentry *parent = vfs_root_dentry;
+  struct dentry *parent = NULL;
   char miss_name[MAX_PATH_LEN];
 
-  // lookup the file, find its parent direntry
-  struct dentry *file_dentry = lookup_final_dentry(path, &parent, miss_name);
+  // lookup the file, find its parent direntry, using current working directory
+  struct dentry *file_dentry = vfs_resolve_path(path, current->pfiles->cwd, &parent, miss_name);
   if (!file_dentry) {
     sprint("vfs_unlink: cannot find the file!\n");
     return -1;
@@ -399,11 +399,11 @@ int vfs_close(struct file *file) {
 // open a dir at vfs layer. the directory must exist on disk.
 //
 struct file *vfs_opendir(const char *path) {
-  struct dentry *parent = vfs_root_dentry;
+  struct dentry *parent = NULL;
   char miss_name[MAX_PATH_LEN];
 
-  // lookup the dir
-  struct dentry *file_dentry = lookup_final_dentry(path, &parent, miss_name);
+  // lookup the dir, using current working directory if available
+  struct dentry *file_dentry = vfs_resolve_path(path, current->pfiles->cwd, &parent, miss_name);
 
   if (!file_dentry || file_dentry->dentry_inode->type != DIR_I) {
     sprint("vfs_opendir: cannot find the direntry!\n");
@@ -443,11 +443,11 @@ int vfs_readdir(struct file *file, struct dir *dir) {
 // and its parent directory must exist.
 //
 int vfs_mkdir(const char *path) {
-  struct dentry *parent = vfs_root_dentry;
+  struct dentry *parent = NULL;
   char miss_name[MAX_PATH_LEN];
 
-  // lookup the dir, find its parent direntry
-  struct dentry *file_dentry = lookup_final_dentry(path, &parent, miss_name);
+  // lookup the dir, find its parent direntry, using current working directory if available
+  struct dentry *file_dentry = vfs_resolve_path(path, current->pfiles->cwd, &parent, miss_name);
   if (file_dentry) {
     sprint("vfs_mkdir: the directory already exists!\n");
     return -1;
@@ -721,3 +721,63 @@ struct vinode *default_alloc_vinode(struct super_block *sb) {
 }
 
 struct file_system_type *fs_list[MAX_SUPPORTED_FS];
+
+//
+// resolve a path to an absolute path and look up the final dentry.
+// if cwd is provided and path is relative, use cwd as the starting point.
+//
+struct dentry *vfs_resolve_path(const char *path, struct dentry *cwd,
+                                struct dentry **parent, char *miss_name) {
+  // check if path is absolute or relative
+  if (path[0] == '/') {
+    // absolute path, start from root
+    return lookup_final_dentry(path, parent, miss_name);
+  } else {
+    // relative path, start from cwd
+    if (cwd == NULL) {
+      // if cwd is NULL, fall back to root
+      return lookup_final_dentry(path, parent, miss_name);
+    }
+    // for relative paths, we need to build the full path
+    // since we can't easily modify the path, we'll use a different approach:
+    // change parent to cwd and let lookup_final_dentry handle it
+    char path_copy[MAX_PATH_LEN];
+    strcpy(path_copy, path);
+
+    // we'll temporarily use cwd as the starting point
+    // but we need to handle "." and ".." specially
+    char resolved_path[MAX_PATH_LEN] = "";
+    struct dentry *current_dentry = cwd;
+
+    // build the resolved path component by component
+    char *token = strtok(path_copy, "/");
+    while (token != NULL) {
+      if (strcmp(token, ".") == 0) {
+        // stay in current directory, do nothing
+      } else if (strcmp(token, "..") == 0) {
+        // go to parent directory
+        if (current_dentry->parent != NULL) {
+          current_dentry = current_dentry->parent;
+        }
+      } else {
+        // normal component, append to resolved path
+        if (strlen(resolved_path) > 0) {
+          strcat(resolved_path, "/");
+        }
+        strcat(resolved_path, token);
+      }
+      token = strtok(NULL, "/");
+    }
+
+    // now resolve the constructed path from the appropriate starting point
+    *parent = current_dentry;
+    if (strlen(resolved_path) == 0) {
+      // the path only contained "." and/or ".."
+      // return the current directory
+      strcpy(miss_name, "");
+      return current_dentry;
+    }
+
+    return lookup_final_dentry(resolved_path, parent, miss_name);
+  }
+}
