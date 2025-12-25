@@ -34,6 +34,8 @@ ssize_t sys_user_print(const char* buf, size_t n) {
 ssize_t sys_user_exit(uint64 code) {
   sprint("User exit with code:%d.\n", code);
   // reclaim the current process, and reschedule. added @lab3_1
+  // wake up parent if it's blocked waiting for this child
+  wakeup_parent_if_blocked(current);
   free_process( current );
   schedule();
   return 0;
@@ -96,6 +98,13 @@ ssize_t sys_user_yield() {
 }
 
 //
+// kernel entry point of wait. added @lab3_3
+//
+ssize_t sys_user_wait(long pid) {
+  return do_wait(pid);
+}
+
+//
 // [a0]: the syscall number; [a1] ... [a7]: arguments to the syscalls.
 // returns the code of success, (e.g., 0 means success, fail for otherwise)
 //
@@ -114,6 +123,8 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, l
       return sys_user_fork();
     case SYS_user_yield:
       return sys_user_yield();
+    case SYS_user_wait:
+      return sys_user_wait(a1);
     default:
       panic("Unknown syscall %ld \n", a0);
   }

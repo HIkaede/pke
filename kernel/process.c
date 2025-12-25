@@ -151,6 +151,10 @@ process* alloc_process() {
 
   procs[i].total_mapped_region = 4;
 
+  // initialize child process tracking
+  procs[i].child_count = 0;
+  memset(procs[i].children, 0, sizeof(procs[i].children));
+
   // return after initialization.
   return &procs[i];
 }
@@ -246,13 +250,123 @@ int do_fork( process* parent)
         child->mapped_info[child->total_mapped_region].seg_type = CODE_SEGMENT;
         child->total_mapped_region++;
         break;
+      case DATA_SEGMENT:
+        // TODO (lab3_3): implement the copy of data segment from parent to child.
+        // data segment should be copied (not shared like code segment) to ensure
+        // that parent and child have independent data.
+        {
+          uint64 va = parent->mapped_info[i].va;
+          uint64 size = parent->mapped_info[i].npages * PGSIZE;
+          // allocate a new physical page for child
+          void* child_pa = alloc_page();
+          // copy the data from parent's data segment
+          memcpy(child_pa, (void*)lookup_pa(parent->pagetable, va), size);
+          // map the child's data segment to the new physical page
+          user_vm_map((pagetable_t)child->pagetable, va, size, (uint64)child_pa,
+                      prot_to_type(PROT_WRITE | PROT_READ, 1));
+          // register the vm region
+          child->mapped_info[child->total_mapped_region].va = parent->mapped_info[i].va;
+          child->mapped_info[child->total_mapped_region].npages =
+            parent->mapped_info[i].npages;
+          child->mapped_info[child->total_mapped_region].seg_type = DATA_SEGMENT;
+          child->total_mapped_region++;
+        }
+        break;
     }
   }
 
   child->status = READY;
   child->trapframe->regs.a0 = 0;
   child->parent = parent;
+  // add child to parent's children list
+  parent->children[parent->child_count++] = child->pid;
   insert_to_ready_queue( child );
 
   return child->pid;
+}
+
+//
+// wait for a child process to exit. added @lab3_3
+// pid == -1: wait for any child
+// pid > 0: wait for specific child
+// returns child's pid on success, -1 on failure
+//
+long do_wait(long pid) {
+  // if pid == -1, wait for any child
+  // if pid > 0, wait for specific child
+
+  // first, check if there are any ZOMBIE children to reap
+  if (pid == -1) {
+    // wait for any child
+    for (int i = 0; i < current->child_count; i++) {
+      int child_pid = current->children[i];
+      if (child_pid > 0 && child_pid < NPROC && procs[child_pid].status == ZOMBIE) {
+        // found a ZOMBIE child, reap it
+        procs[child_pid].status = FREE;
+        // remove from children list (mark as 0)
+        current->children[i] = 0;
+        return child_pid;
+      }
+    }
+    // no ZOMBIE child found, need to block and wait
+    current->status = BLOCKED;
+    schedule();
+    // after schedule returns, check again for ZOMBIE children
+    for (int i = 0; i < current->child_count; i++) {
+      int child_pid = current->children[i];
+      if (child_pid > 0 && child_pid < NPROC && procs[child_pid].status == ZOMBIE) {
+        procs[child_pid].status = FREE;
+        current->children[i] = 0;
+        return child_pid;
+      }
+    }
+    // still no ZOMBIE child (should not happen in normal case)
+    return -1;
+  } else if (pid > 0) {
+    // wait for specific child
+    // check if pid is a valid child of current process
+    int found = 0;
+    for (int i = 0; i < current->child_count; i++) {
+      if (current->children[i] == pid) {
+        found = 1;
+        break;
+      }
+    }
+    if (!found) {
+      // pid is not a child of current process
+      return -1;
+    }
+
+    // check if child is already ZOMBIE
+    if (pid < NPROC && procs[pid].status == ZOMBIE) {
+      procs[pid].status = FREE;
+      // remove from children list
+      for (int i = 0; i < current->child_count; i++) {
+        if (current->children[i] == pid) {
+          current->children[i] = 0;
+          break;
+        }
+      }
+      return pid;
+    }
+
+    // child is not ZOMBIE, block and wait
+    current->status = BLOCKED;
+    schedule();
+    // after schedule returns, check again
+    if (pid < NPROC && procs[pid].status == ZOMBIE) {
+      procs[pid].status = FREE;
+      for (int i = 0; i < current->child_count; i++) {
+        if (current->children[i] == pid) {
+          current->children[i] = 0;
+          break;
+        }
+      }
+      return pid;
+    }
+    return -1;
+  } else {
+    // pid <= 0 and pid != -1 is invalid
+    return -1;
+  }
 }

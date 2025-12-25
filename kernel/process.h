@@ -89,6 +89,9 @@ typedef struct process_t {
 
   // accounting. added @lab3_3
   int tick_count;
+  // list of child processes. added @lab3_3
+  int child_count;
+  int children[NPROC];
 }process;
 
 // switch to run user app
@@ -102,6 +105,8 @@ process* alloc_process();
 int free_process( process* proc );
 // fork a child from parent
 int do_fork(process* parent);
+// wait for a child process to exit. added @lab3_3
+long do_wait(long pid);
 
 // current running process
 extern process* current;

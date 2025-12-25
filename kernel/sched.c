@@ -71,3 +71,16 @@ void schedule() {
   sprint( "going to schedule process %d to run.\n", current->pid );
   switch_to( current );
 }
+
+//
+// wake up the parent of a child process if the parent is blocked waiting for children.
+// added @lab3_3
+//
+void wakeup_parent_if_blocked(process* child) {
+  if (child->parent == NULL) return;
+  process* parent = child->parent;
+  // if parent is blocked, wake it up by inserting into ready queue
+  if (parent->status == BLOCKED) {
+    insert_to_ready_queue(parent);
+  }
+}
