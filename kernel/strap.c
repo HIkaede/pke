@@ -8,6 +8,7 @@
 #include "syscall.h"
 #include "pmm.h"
 #include "vmm.h"
+#include "memlayout.h"
 #include "util/functions.h"
 
 #include "spike_interface/spike_utils.h"
@@ -53,27 +54,47 @@ void handle_mtimer_trap() {
 //
 void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
   sprint("handle_page_fault: %lx\n", stval);
-  switch (mcause) {
-    case CAUSE_STORE_PAGE_FAULT:
-      // TODO (lab2_3): implement the operations that solve the page fault to
-      // dynamically increase application stack.
-      // hint: first allocate a new physical page, and then, maps the new page to the
-      // virtual address that causes the page fault.
-      {
-        uint64 pa = (uint64)alloc_page();
-        if (pa == 0) {
-          panic("handle_user_page_fault: alloc_page failed!");
-        }
-        uint64 va = ROUNDDOWN(stval, PGSIZE);
-        if (map_pages(current->pagetable, va, PGSIZE, pa,
-                      prot_to_type(PROT_READ | PROT_WRITE, 1)) != 0) {
-          panic("handle_user_page_fault: map_pages failed!");
-        }
+
+  // Check if the fault address is valid for stack growth.
+  // Valid stack growth: address is in the stack region, which is:
+  // - Less than USER_STACK_TOP (0x7ffff000)
+  // - Greater than or equal to a minimum stack address (we use 0x70000000 as boundary)
+  // This prevents illegal access to unmapped regions like heap out-of-bounds.
+  if (stval < USER_STACK_TOP && stval >= USER_STACK_TOP - (1 << 23)) {
+    // Address is in stack region, check if page table entry exists.
+    // Use page_walk to check if the page table entry exi sts for this virtual address.
+    pte_t *pte = page_walk(current->pagetable, stval, 0);
+
+    // Allocate a new page if the PTE doesn't exist or is invalid.
+    if (pte == 0 || *pte == 0) {
+      switch (mcause) {
+        case CAUSE_STORE_PAGE_FAULT:
+        case CAUSE_LOAD_PAGE_FAULT:
+          {
+            uint64 pa = (uint64)alloc_page();
+            if (pa == 0) {
+              panic("handle_user_page_fault: alloc_page failed!");
+            }
+            uint64 va = ROUNDDOWN(stval, PGSIZE);
+            if (map_pages(current->pagetable, va, PGSIZE, pa,
+                          prot_to_type(PROT_READ | PROT_WRITE, 1)) != 0) {
+              panic("handle_user_page_fault: map_pages failed!");
+            }
+          }
+          break;
+        default:
+          sprint("unknown page fault.\n");
+          break;
       }
-      break;
-    default:
-      sprint("unknown page fault.\n");
-      break;
+    } else {
+      // PTE exists and is valid, but still got page fault - invalid access.
+      sprint("this address is not available!\n");
+      shutdown(-1);
+    }
+  } else {
+    // Address is not in stack region - invalid access.
+    sprint("this address is not available!\n");
+    shutdown(-1);
   }
 }
 
