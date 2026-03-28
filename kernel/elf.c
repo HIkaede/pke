@@ -280,6 +280,40 @@ void load_bincode_from_host_elf(process *p) {
   // entry (virtual, also physical in lab1_x) address
   p->trapframe->epc = elfloader.ehdr.entry;
 
+  // ---------- lab1_challenge2: read .debug_line section ----------
+  // Use the section header string table to find the .debug_line section.
+  elf_header *ehdr = &elfloader.ehdr;
+
+  // Read the section header string table section header
+  elf_sect_header shstr_sh;
+  uint64 shstr_off = ehdr->shoff + (uint64)ehdr->shstrndx * sizeof(elf_sect_header);
+  elf_fpread(&elfloader, (void *)&shstr_sh, sizeof(shstr_sh), shstr_off);
+
+  // Read the section header string table content into a temporary buffer
+  char shstrtab[512];
+  uint64 shstrtab_size = shstr_sh.size < 512 ? shstr_sh.size : 512;
+  elf_fpread(&elfloader, shstrtab, shstrtab_size, shstr_sh.offset);
+
+  // Iterate through all section headers to find .debug_line
+  elf_sect_header sh;
+  for (int i = 0; i < ehdr->shnum; i++) {
+    uint64 sh_off = ehdr->shoff + (uint64)i * sizeof(elf_sect_header);
+    elf_fpread(&elfloader, (void *)&sh, sizeof(sh), sh_off);
+
+    // Compare the section name
+    if (sh.name < shstrtab_size && strcmp(&shstrtab[sh.name], ".debug_line") == 0) {
+      // Found .debug_line section. Read its data into memory.
+      // Place it at a safe location after the app code (0x81020000, between
+      // app code end and user stack at 0x81100000).
+      char *debug_line_buf = (char *)0x81020000;
+      elf_fpread(&elfloader, debug_line_buf, sh.size, sh.offset);
+
+      // Parse the debug_line data to build the address-line mapping
+      make_addr_line(&elfloader, debug_line_buf, sh.size);
+      break;
+    }
+  }
+
   // close the host spike file
   spike_file_close( info.f );
 
