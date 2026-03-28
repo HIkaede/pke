@@ -24,7 +24,8 @@ typedef struct process_t {
 }process;
 
 void switch_to(process*);
+process* current_proc(void);
 
-extern process* current;
+extern process* current[NCPU];
 
 #endif
