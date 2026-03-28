@@ -238,6 +238,8 @@ int do_fork( process* parent)
           uint64 pa = lookup_pa(parent->pagetable, va);
           user_vm_map((pagetable_t)child->pagetable, va, size, pa,
                       prot_to_type(PROT_READ | PROT_EXEC, 1));
+          sprint("do_fork map code segment at pa:%08lx of parent to child at va:%08lx.\n", pa,
+                 va);
         }
         // after mapping, register the vm region (do not delete codes below!)
         child->mapped_info[child->total_mapped_region].va = parent->mapped_info[i].va;
@@ -245,6 +247,25 @@ int do_fork( process* parent)
           parent->mapped_info[i].npages;
         child->mapped_info[child->total_mapped_region].seg_type = CODE_SEGMENT;
         child->total_mapped_region++;
+        break;
+      case DATA_SEGMENT:
+        {
+          uint64 va = parent->mapped_info[i].va;
+          for (uint32 page = 0; page < parent->mapped_info[i].npages; page++) {
+            uint64 page_va = va + page * PGSIZE;
+            uint64 page_pa = lookup_pa(parent->pagetable, page_va);
+            void* child_pa = alloc_page();
+
+            memcpy(child_pa, (void*)page_pa, PGSIZE);
+            user_vm_map((pagetable_t)child->pagetable, page_va, PGSIZE, (uint64)child_pa,
+                        prot_to_type(PROT_WRITE | PROT_READ, 1));
+          }
+
+          child->mapped_info[child->total_mapped_region].va = va;
+          child->mapped_info[child->total_mapped_region].npages = parent->mapped_info[i].npages;
+          child->mapped_info[child->total_mapped_region].seg_type = DATA_SEGMENT;
+          child->total_mapped_region++;
+        }
         break;
     }
   }
