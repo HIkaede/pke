@@ -216,12 +216,13 @@ int do_fork( process* parent)
             user_vm_map((pagetable_t)child->pagetable, heap_block, PGSIZE, (uint64)child_pa,
                         prot_to_type(PROT_WRITE | PROT_READ, 1));
           }
-          
+
           child->mapped_info[HEAP_SEGMENT].npages = parent->mapped_info[HEAP_SEGMENT].npages;
+
+          // copy the heap manager from parent to child
+          memcpy((void*)&child->user_heap, (void*)&parent->user_heap, sizeof(parent->user_heap));
+          break;
         }
-        // copy the heap manager from parent to child
-        memcpy((void*)&child->user_heap, (void*)&parent->user_heap, sizeof(parent->user_heap));
-        break;
       case CODE_SEGMENT:
         // TODO (lab3_1): implment the mapping of child code segment to parent's
         // code segment.
