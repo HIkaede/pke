@@ -16,6 +16,7 @@
 #include "pmm.h"
 #include "memlayout.h"
 #include "sched.h"
+#include "proc_file.h"
 #include "spike_interface/spike_utils.h"
 
 //Two functions defined in kernel/usertrap.S
@@ -150,6 +151,7 @@ process* alloc_process() {
   procs[i].mapped_info[HEAP_SEGMENT].seg_type = HEAP_SEGMENT;
 
   procs[i].total_mapped_region = 4;
+  procs[i].wait_child_pid = -1;
 
   // initialize files_struct
   procs[i].pfiles = init_proc_file_management();
@@ -240,6 +242,8 @@ int do_fork( process* parent)
           uint64 va = parent->mapped_info[i].va;
           uint64 size = parent->mapped_info[i].npages * PGSIZE;
           uint64 pa = lookup_pa(parent->pagetable, va);
+          sprint("do_fork map code segment at pa:%016lx of parent to child at va:%016lx.\n",
+                 pa, va);
           user_vm_map((pagetable_t)child->pagetable, va, size, pa,
                       prot_to_type(PROT_READ | PROT_EXEC, 1));
         }
@@ -256,7 +260,91 @@ int do_fork( process* parent)
   child->status = READY;
   child->trapframe->regs.a0 = 0;
   child->parent = parent;
+  child->wait_child_pid = -1;
   insert_to_ready_queue( child );
 
   return child->pid;
+}
+
+//
+// wait for child process "pid" to exit.
+// return 0 on success, -1 on error.
+//
+int do_wait(int pid) {
+  if (pid < 0 || pid >= NPROC) return -1;
+
+  process *child = &procs[pid];
+  if (child->parent != current) return -1;
+
+  while (child->status != ZOMBIE && child->status != FREE) {
+    current->wait_child_pid = pid;
+    current->status = BLOCKED;
+    schedule();
+  }
+
+  child->status = FREE;
+  child->parent = NULL;
+  current->wait_child_pid = -1;
+  return 0;
+}
+
+//
+// replace current process image with the executable at "path".
+// "para" will be passed to the new app as argv[0].
+// returns -1 on failure; on success it does not return to caller context.
+//
+int do_exec(char *path, char *para) {
+  char path_copy[256];
+  char para_copy[256];
+
+  if (!path || !para) return -1;
+  strcpy(path_copy, path);
+  strcpy(para_copy, para);
+
+  for (int i = 0; i < current->total_mapped_region; ++i) {
+    mapped_region *mr = &current->mapped_info[i];
+    if (mr->va == 0 || mr->npages == 0) continue;
+
+    if (mr->seg_type == DATA_SEGMENT || mr->seg_type == HEAP_SEGMENT) {
+      user_vm_unmap((pagetable_t)current->pagetable, mr->va, mr->npages * PGSIZE, 1);
+      mr->va = 0;
+      mr->npages = 0;
+      mr->seg_type = 0;
+    } else if (mr->seg_type == CODE_SEGMENT) {
+      // Code pages can be shared due to fork, so unmap without freeing.
+      user_vm_unmap((pagetable_t)current->pagetable, mr->va, mr->npages * PGSIZE, 0);
+      mr->va = 0;
+      mr->npages = 0;
+      mr->seg_type = 0;
+    }
+  }
+
+  current->total_mapped_region = 4;
+
+  current->user_heap.heap_top = USER_FREE_ADDRESS_START;
+  current->user_heap.heap_bottom = USER_FREE_ADDRESS_START;
+  current->user_heap.free_pages_count = 0;
+  current->mapped_info[HEAP_SEGMENT].va = USER_FREE_ADDRESS_START;
+  current->mapped_info[HEAP_SEGMENT].npages = 0;
+  current->mapped_info[HEAP_SEGMENT].seg_type = HEAP_SEGMENT;
+
+  load_bincode_from_host_elf(current, path_copy);
+
+  uint64 arg_str_va = USER_STACK_TOP - 256;
+  uint64 argv_va = USER_STACK_TOP - 272;
+
+  char *arg_pa =
+      (char *)user_va_to_pa((pagetable_t)current->pagetable, (void *)arg_str_va);
+  uint64 *argv_pa =
+      (uint64 *)user_va_to_pa((pagetable_t)current->pagetable, (void *)argv_va);
+  if (!arg_pa || !argv_pa) return -1;
+
+  strcpy(arg_pa, para_copy);
+  argv_pa[0] = arg_str_va;
+  argv_pa[1] = 0;
+
+  current->trapframe->regs.a0 = 1;
+  current->trapframe->regs.a1 = argv_va;
+
+  return 0;
 }

@@ -85,6 +85,8 @@ typedef struct process_t {
   int status;
   // parent process
   struct process_t *parent;
+  // child pid this process is waiting for; -1 means not waiting
+  int wait_child_pid;
   // next queue element
   struct process_t *queue_next;
 
@@ -106,6 +108,10 @@ process* alloc_process();
 int free_process( process* proc );
 // fork a child from parent
 int do_fork(process* parent);
+// wait for a child process to exit
+int do_wait(int pid);
+// replace current process image with a new program
+int do_exec(char *path, char *para);
 
 // current running process
 extern process* current;

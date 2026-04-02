@@ -34,6 +34,14 @@ ssize_t sys_user_print(const char* buf, size_t n) {
 //
 ssize_t sys_user_exit(uint64 code) {
   sprint("User exit with code:%d.\n", code);
+
+  // wake parent that is waiting for this process.
+  if (current->parent != NULL && current->parent->status == BLOCKED &&
+      current->parent->wait_child_pid == (int)current->pid) {
+    current->parent->status = READY;
+    insert_to_ready_queue(current->parent);
+  }
+
   // reclaim the current process, and reschedule. added @lab3_1
   free_process( current );
   schedule();
@@ -215,6 +223,24 @@ ssize_t sys_user_unlink(char * vfn){
 }
 
 //
+// wait for a child process
+//
+ssize_t sys_user_wait(int pid) {
+  return do_wait(pid);
+}
+
+//
+// execute another user application in current process context
+//
+ssize_t sys_user_exec(char *pathva, char *parava) {
+  char *pathpa =
+      (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)pathva);
+  char *parapa =
+      (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)parava);
+  return do_exec(pathpa, parapa);
+}
+
+//
 // [a0]: the syscall number; [a1] ... [a7]: arguments to the syscalls.
 // returns the code of success, (e.g., 0 means success, fail for otherwise)
 //
@@ -262,6 +288,11 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, l
       return sys_user_link((char *)a1, (char *)a2);
     case SYS_user_unlink:
       return sys_user_unlink((char *)a1);
+    // added @lab4_challenge3
+    case SYS_user_wait:
+      return sys_user_wait(a1);
+    case SYS_user_exec:
+      return sys_user_exec((char *)a1, (char *)a2);
     default:
       panic("Unknown syscall %ld \n", a0);
   }
