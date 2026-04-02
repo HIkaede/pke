@@ -9,6 +9,7 @@
 #include "pmm.h"
 #include "vmm.h"
 #include "sched.h"
+#include "string.h"
 #include "util/functions.h"
 
 #include "spike_interface/spike_utils.h"
@@ -56,16 +57,29 @@ void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
   sprint("handle_page_fault: %lx\n", stval);
   switch (mcause) {
     case CAUSE_STORE_PAGE_FAULT:
-      // TODO (lab2_3): implement the operations that solve the page fault to
-      // dynamically increase application stack.
-      // hint: first allocate a new physical page, and then, maps the new page to the
-      // virtual address that causes the page fault.
       {
-        uint64 pa = (uint64)alloc_page();
-        if (pa == 0) {
-          panic("handle_user_page_fault: alloc_page failed!");
-        }
         uint64 va = ROUNDDOWN(stval, PGSIZE);
+        pte_t* pte = page_walk(current->pagetable, va, 0);
+
+        // COW fault: write to a present but read-only COW page.
+        if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
+          uint64 old_pa = PTE2PA(*pte);
+          uint64 new_pa = (uint64)alloc_page();
+          if (new_pa == 0)
+            panic("handle_user_page_fault: alloc_page failed on COW!");
+
+          memcpy((void*)new_pa, (void*)old_pa, PGSIZE);
+          uint64 flags = (PTE_FLAGS(*pte) | PTE_W | PTE_D) & (~PTE_COW);
+          *pte = PA2PTE(new_pa) | flags | PTE_V;
+          free_page((void*)old_pa);
+          flush_tlb();
+          break;
+        }
+
+        // non-COW fault: lazily grow stack by mapping a fresh writable page.
+        uint64 pa = (uint64)alloc_page();
+        if (pa == 0)
+          panic("handle_user_page_fault: alloc_page failed!");
         if (map_pages(current->pagetable, va, PGSIZE, pa,
                       prot_to_type(PROT_READ | PROT_WRITE, 1)) != 0) {
           panic("handle_user_page_fault: map_pages failed!");

@@ -14,6 +14,8 @@ extern uint64 g_mem_size;
 
 static uint64 free_mem_start_addr;  //beginning address of free memory
 static uint64 free_mem_end_addr;    //end address of free memory (not included)
+static uint64 total_pages;
+static uint16* page_ref_count;
 
 typedef struct node {
   struct node *next;
@@ -22,6 +24,20 @@ typedef struct node {
 // g_free_mem_list is the head of the list of free physical memory pages
 static list_node g_free_mem_list;
 
+static inline int pa_to_index(uint64 pa) {
+  return (int)((pa - free_mem_start_addr) / PGSIZE);
+}
+
+static inline int valid_managed_pa(uint64 pa) {
+  return ((pa % PGSIZE) == 0) && pa >= free_mem_start_addr && pa < free_mem_end_addr;
+}
+
+static inline void push_free_page(void *pa) {
+  list_node *n = (list_node *)pa;
+  n->next = g_free_mem_list.next;
+  g_free_mem_list.next = n;
+}
+
 //
 // actually creates the freepage list. each page occupies 4KB (PGSIZE), i.e., small page.
 // PGSIZE is defined in kernel/riscv.h, ROUNDUP is defined in util/functions.h.
@@ -29,20 +45,25 @@ static list_node g_free_mem_list;
 static void create_freepage_list(uint64 start, uint64 end) {
   g_free_mem_list.next = 0;
   for (uint64 p = ROUNDUP(start, PGSIZE); p + PGSIZE < end; p += PGSIZE)
-    free_page( (void *)p );
+    push_free_page((void *)p);
 }
 
 //
 // place a physical page at *pa to the free list of g_free_mem_list (to reclaim the page)
 //
 void free_page(void *pa) {
-  if (((uint64)pa % PGSIZE) != 0 || (uint64)pa < free_mem_start_addr || (uint64)pa >= free_mem_end_addr)
+  if (!valid_managed_pa((uint64)pa))
     panic("free_page 0x%lx \n", pa);
 
+  int idx = pa_to_index((uint64)pa);
+  if (page_ref_count[idx] == 0)
+    panic("free_page: double free on 0x%lx\n", pa);
+
+  page_ref_count[idx]--;
+  if (page_ref_count[idx] > 0) return;
+
   // insert a physical page to g_free_mem_list
-  list_node *n = (list_node *)pa;
-  n->next = g_free_mem_list.next;
-  g_free_mem_list.next = n;
+  push_free_page(pa);
 }
 
 //
@@ -53,7 +74,29 @@ void *alloc_page(void) {
   list_node *n = g_free_mem_list.next;
   if (n) g_free_mem_list.next = n->next;
 
+  if (n) {
+    int idx = pa_to_index((uint64)n);
+    page_ref_count[idx] = 1;
+  }
+
   return (void *)n;
+}
+
+void page_ref_inc(void* pa) {
+  if (!valid_managed_pa((uint64)pa))
+    panic("page_ref_inc 0x%lx\n", pa);
+
+  int idx = pa_to_index((uint64)pa);
+  if (page_ref_count[idx] == 0)
+    panic("page_ref_inc on free page 0x%lx\n", pa);
+  page_ref_count[idx]++;
+}
+
+int page_ref_get(void* pa) {
+  if (!valid_managed_pa((uint64)pa))
+    panic("page_ref_get 0x%lx\n", pa);
+
+  return page_ref_count[pa_to_index((uint64)pa)];
 }
 
 //
@@ -79,6 +122,10 @@ void pmm_init() {
     panic( "Error when recomputing physical memory size (g_mem_size).\n" );
 
   free_mem_end_addr = g_mem_size + DRAM_BASE;
+  total_pages = (free_mem_end_addr - free_mem_start_addr) / PGSIZE;
+  page_ref_count = (uint16*)free_mem_start_addr;
+  memset(page_ref_count, 0, total_pages * sizeof(uint16));
+  free_mem_start_addr = ROUNDUP(free_mem_start_addr + total_pages * sizeof(uint16), PGSIZE);
   sprint("free physical memory address: [0x%lx, 0x%lx] \n", free_mem_start_addr,
     free_mem_end_addr - 1);
 
