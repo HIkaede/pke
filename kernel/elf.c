@@ -8,6 +8,7 @@
 #include "riscv.h"
 #include "vmm.h"
 #include "pmm.h"
+#include "hostfs.h"
 #include "spike_interface/spike_utils.h"
 
 typedef struct elf_info_t {
@@ -79,9 +80,12 @@ elf_status elf_load(elf_ctx *ctx) {
     // allocate memory block before elf loading
     void *dest = elf_alloc_mb(ctx, ph_addr.vaddr, ph_addr.vaddr, ph_addr.memsz);
 
-    // actual loading
-    if (elf_fpread(ctx, dest, ph_addr.memsz, ph_addr.off) != ph_addr.memsz)
+    // actual loading: file content is filesz bytes, the remaining (memsz-filesz)
+    // bytes should be zero-initialized (e.g., .bss).
+    if (elf_fpread(ctx, dest, ph_addr.filesz, ph_addr.off) != ph_addr.filesz)
       return EL_EIO;
+    if (ph_addr.memsz > ph_addr.filesz)
+      memset((char *)dest + ph_addr.filesz, 0, ph_addr.memsz - ph_addr.filesz);
 
     // record the vm region in proc->mapped_info. added @lab3_1
     int j;
@@ -112,6 +116,16 @@ typedef union {
   char *argv[MAX_CMDLINE_ARGS];
 } arg_buf;
 
+static const char *normalize_exec_path(const char *path, char *out) {
+  if (!path) return NULL;
+  if (path[0] == '/') {
+    strcpy(out, H_ROOT_DIR);
+    strcat(out, path);
+    return out;
+  }
+  return path;
+}
+
 //
 // returns the number (should be 1) of string(s) after PKE kernel in command line.
 // and store the string(s) in arg_bug_msg.
@@ -134,6 +148,61 @@ static size_t parse_args(arg_buf *arg_bug_msg) {
 }
 
 //
+// load an application ELF from hostfs path into process address space.
+// return: 0 on success, -1 on failure.
+//
+int load_bincode_from_host_elf_byname(process *p, const char *path) {
+  if (!path) return -1;
+
+  char full_path[MAX_PATH_LEN];
+  const char *real_path = normalize_exec_path(path, full_path);
+
+  sprint("Application: %s\n", real_path);
+
+  elf_ctx elfloader;
+  elf_info info;
+
+  info.f = spike_file_open(real_path, O_RDONLY, 0);
+  info.p = p;
+  if (IS_ERR_VALUE(info.f)) return -1;
+
+  if (elf_init(&elfloader, &info) != EL_OK) {
+    spike_file_close(info.f);
+    return -1;
+  }
+
+  if (elf_load(&elfloader) != EL_OK) {
+    spike_file_close(info.f);
+    return -1;
+  }
+
+  p->trapframe->epc = elfloader.ehdr.entry;
+  spike_file_close(info.f);
+
+  sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+  return 0;
+}
+
+int probe_bincode_from_host_elf_byname(const char *path) {
+  if (!path) return -1;
+
+  char full_path[MAX_PATH_LEN];
+  const char *real_path = normalize_exec_path(path, full_path);
+
+  spike_file_t *f = spike_file_open(real_path, O_RDONLY, 0);
+  if (IS_ERR_VALUE(f)) return -1;
+
+  elf_ctx elfloader;
+  elf_info info;
+  info.f = f;
+  info.p = NULL;
+
+  int ret = (elf_init(&elfloader, &info) == EL_OK) ? 0 : -1;
+  spike_file_close(f);
+  return ret;
+}
+
+//
 // load the elf of user application, by using the spike file interface.
 //
 void load_bincode_from_host_elf(process *p) {
@@ -143,30 +212,6 @@ void load_bincode_from_host_elf(process *p) {
   size_t argc = parse_args(&arg_bug_msg);
   if (!argc) panic("You need to specify the application program!\n");
 
-  sprint("Application: %s\n", arg_bug_msg.argv[0]);
-
-  //elf loading. elf_ctx is defined in kernel/elf.h, used to track the loading process.
-  elf_ctx elfloader;
-  // elf_info is defined above, used to tie the elf file and its corresponding process.
-  elf_info info;
-
-  info.f = spike_file_open(arg_bug_msg.argv[0], O_RDONLY, 0);
-  info.p = p;
-  // IS_ERR_VALUE is a macro defined in spike_interface/spike_htif.h
-  if (IS_ERR_VALUE(info.f)) panic("Fail on openning the input application program.\n");
-
-  // init elfloader context. elf_init() is defined above.
-  if (elf_init(&elfloader, &info) != EL_OK)
-    panic("fail to init elfloader.\n");
-
-  // load elf. elf_load() is defined above.
-  if (elf_load(&elfloader) != EL_OK) panic("Fail on loading elf.\n");
-
-  // entry (virtual, also physical in lab1_x) address
-  p->trapframe->epc = elfloader.ehdr.entry;
-
-  // close the host spike file
-  spike_file_close( info.f );
-
-  sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+  if (load_bincode_from_host_elf_byname(p, arg_bug_msg.argv[0]) != 0)
+    panic("Fail on loading elf from host file system.\n");
 }

@@ -260,3 +260,55 @@ int do_fork( process* parent)
 
   return child->pid;
 }
+
+//
+// replace current process image with a new application image.
+// return: 0 on success, -1 on failure.
+//
+int do_exec(char *path) {
+  if (!current || !path) return -1;
+
+  char path_copy[MAX_PATH_LEN];
+  if (strlen(path) >= MAX_PATH_LEN) return -1;
+  strcpy(path_copy, path);
+
+  // Verify executable path and ELF format before tearing down current image.
+  if (probe_bincode_from_host_elf_byname(path_copy) != 0) return -1;
+
+  // Unmap old user image (code/data/heap) while preserving stack/trapframe/trap vector.
+  for (int i = 0; i < current->total_mapped_region; ++i) {
+    int seg_type = current->mapped_info[i].seg_type;
+    if (seg_type == CODE_SEGMENT || seg_type == DATA_SEGMENT) {
+      if (current->mapped_info[i].npages > 0) {
+        user_vm_unmap(current->pagetable, current->mapped_info[i].va,
+                      current->mapped_info[i].npages * PGSIZE, 1);
+      }
+      current->mapped_info[i].va = 0;
+      current->mapped_info[i].npages = 0;
+      current->mapped_info[i].seg_type = 0;
+    }
+  }
+
+  if (current->mapped_info[HEAP_SEGMENT].npages > 0) {
+    user_vm_unmap(current->pagetable, current->mapped_info[HEAP_SEGMENT].va,
+                  current->mapped_info[HEAP_SEGMENT].npages * PGSIZE, 1);
+  }
+  current->mapped_info[HEAP_SEGMENT].npages = 0;
+  current->user_heap.heap_top = USER_FREE_ADDRESS_START;
+  current->user_heap.heap_bottom = USER_FREE_ADDRESS_START;
+  current->user_heap.free_pages_count = 0;
+
+  // Keep vm bookkeeping consistent for subsequent ELF segment insertion.
+  current->total_mapped_region = 4;
+
+  // Reset user stack pointer and clear stack page content.
+  current->trapframe->regs.sp = USER_STACK_TOP;
+  memset((void *)lookup_pa(current->pagetable, USER_STACK_TOP - PGSIZE), 0, PGSIZE);
+
+  if (load_bincode_from_host_elf_byname(current, path_copy) != 0) {
+    sprint("do_exec: cannot load application: %s\n", path_copy);
+    return -1;
+  }
+
+  return 0;
+}
